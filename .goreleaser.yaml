@@ -1,0 +1,26 @@
+project_name: htcat
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: htcat
+    main: ./cmd/htcat
+    binary: htcat
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: tar.gz
+
+changelog:
+  sort: asc
