@@ -26,6 +26,9 @@ type HtCat struct {
 	u  *url.URL
 	cl *http.Client
 
+	// Maximum fragment size in bytes
+	maxFragmentSize int64
+
 	// Protect httpFragGen with a Mutex.
 	httpFragGenMu sync.Mutex
 	hfg           httpFragGen
@@ -100,8 +103,8 @@ func (cat *HtCat) startup(parallelism int) {
 	// Set up httpFrag generator state.
 	cat.hfg.totalSize = length
 	cat.hfg.targetFragSize = 1 + ((length - 1) / int64(parallelism))
-	if cat.hfg.targetFragSize > 20*mB {
-		cat.hfg.targetFragSize = 20 * mB
+	if cat.hfg.targetFragSize > cat.maxFragmentSize {
+		cat.hfg.targetFragSize = cat.maxFragmentSize
 	}
 
 	// Very small fragments are probably not worthwhile to start
@@ -143,10 +146,11 @@ func (cat *HtCat) startup(parallelism int) {
 	}()
 }
 
-func New(client *http.Client, u *url.URL, parallelism int) *HtCat {
+func New(client *http.Client, u *url.URL, parallelism int, maxFragmentSize int64) *HtCat {
 	cat := HtCat{
-		u:  u,
-		cl: client,
+		u:               u,
+		cl:              client,
+		maxFragmentSize: maxFragmentSize,
 	}
 
 	cat.d.initDefrag()
