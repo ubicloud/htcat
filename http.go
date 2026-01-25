@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strconv"
 	"sync"
+	"time"
 )
 
 const (
@@ -28,6 +29,9 @@ type HtCat struct {
 
 	// Maximum fragment size in bytes
 	maxFragmentSize int64
+
+	// Maximum number of retries for failed chunk requests
+	maxRetries int
 
 	// Protect httpFragGen with a Mutex.
 	httpFragGenMu sync.Mutex
@@ -146,11 +150,12 @@ func (cat *HtCat) startup(parallelism int) {
 	}()
 }
 
-func New(client *http.Client, u *url.URL, parallelism int, maxFragmentSize int64) *HtCat {
+func New(client *http.Client, u *url.URL, parallelism int, maxFragmentSize int64, maxRetries int) *HtCat {
 	cat := HtCat{
 		u:               u,
 		cl:              client,
 		maxFragmentSize: maxFragmentSize,
+		maxRetries:      maxRetries,
 	}
 
 	cat.d.initDefrag()
@@ -189,6 +194,14 @@ func (cat *HtCat) nextFragment() *httpFrag {
 	return hf
 }
 
+// isRetryableStatusCode returns true if the HTTP status code indicates
+// a transient error that may succeed on retry.
+func isRetryableStatusCode(statusCode int) bool {
+	// Retry on server errors (5xx) and some specific client errors
+	// that may be transient (408 Request Timeout, 429 Too Many Requests)
+	return statusCode >= 500 || statusCode == 408 || statusCode == 429
+}
+
 func (cat *HtCat) get() {
 	for {
 		hf := cat.nextFragment()
@@ -196,37 +209,62 @@ func (cat *HtCat) get() {
 			return
 		}
 
-		req := http.Request{
-			Method:     "GET",
-			URL:        cat.u,
-			Proto:      "HTTP/1.1",
-			ProtoMajor: 1,
-			ProtoMinor: 1,
-			Header:     hf.header,
-			Body:       nil,
-			Host:       cat.u.Host,
+		var lastErr error
+		for attempt := 0; attempt <= cat.maxRetries; attempt++ {
+			if attempt > 0 {
+				// Exponential backoff: 1s, 2s, 4s, 8s, ...
+				backoff := time.Duration(1<<(attempt-1)) * time.Second
+				time.Sleep(backoff)
+			}
+
+			req := http.Request{
+				Method:     "GET",
+				URL:        cat.u,
+				Proto:      "HTTP/1.1",
+				ProtoMajor: 1,
+				ProtoMinor: 1,
+				Header:     hf.header,
+				Body:       nil,
+				Host:       cat.u.Host,
+			}
+
+			resp, err := cat.cl.Do(&req)
+			if err != nil {
+				// Network errors are retryable
+				lastErr = err
+				continue
+			}
+
+			// Check for an acceptable HTTP status code.
+			if !(resp.StatusCode == 206 || resp.StatusCode == 200) {
+				resp.Body.Close()
+				lastErr = HttpStatusError{
+					error: fmt.Errorf("Expected HTTP Status "+
+						"206 or 200, received: %q",
+						resp.Status),
+					Status: resp.Status}
+
+				// Only retry on retryable status codes
+				if !isRetryableStatusCode(resp.StatusCode) {
+					cat.d.cancel(lastErr)
+					return
+				}
+				continue
+			}
+
+			// Success - process the response
+			er := newEagerReader(resp.Body, hf.size)
+			hf.fragment.contents = er
+			cat.d.register(hf.fragment)
+			er.WaitClosed()
+			lastErr = nil
+			break
 		}
 
-		resp, err := cat.cl.Do(&req)
-		if err != nil {
-			cat.d.cancel(err)
+		// All retries exhausted
+		if lastErr != nil {
+			cat.d.cancel(lastErr)
 			return
 		}
-
-		// Check for an acceptable HTTP status code.
-		if !(resp.StatusCode == 206 || resp.StatusCode == 200) {
-			err = HttpStatusError{
-				error: fmt.Errorf("Expected HTTP Status "+
-					"206 or 200, received: %q",
-					resp.Status),
-				Status: resp.Status}
-			go cat.d.cancel(err)
-			return
-		}
-
-		er := newEagerReader(resp.Body, hf.size)
-		hf.fragment.contents = er
-		cat.d.register(hf.fragment)
-		er.WaitClosed()
 	}
 }
