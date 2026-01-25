@@ -16,6 +16,7 @@ const version = "2.0.0-dev"
 var onlyPrintVersion = flag.Bool("version", false, "print the htcat version")
 var parallelism = flag.Int("parallelism", 5, "number of parallel HTTP requests")
 var maxFragmentSize = flag.Int64("max-fragment-size", 20, "maximum fragment size in MB")
+var maxRetries = flag.Int("retries", 3, "maximum number of retries for failed chunks")
 
 const (
 	_        = iota
@@ -74,7 +75,7 @@ func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
 	// Begin the GET.
-	htc := htcat.New(&client, u, *parallelism, *maxFragmentSize*MB)
+	htc := htcat.New(&client, u, *parallelism, *maxFragmentSize*MB, *maxRetries)
 
 	if _, err := htc.WriteTo(os.Stdout); err != nil {
 		log.Fatalf("aborting: could not write to output stream: %v",
